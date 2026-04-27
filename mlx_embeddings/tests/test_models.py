@@ -676,6 +676,62 @@ class TestModels(unittest.TestCase):
         self.assertIs(processor.image_processor, dummy_image_processor)
         self.assertEqual(processor.processor.chat_template, "dummy-template")
         self.assertEqual(processor.processor.video_processor.merge_size, 2)
+        # Verify the modality id lists are populated through the user-facing
+        # from_pretrained path too (not only the static _build_processor
+        # helper). Token ids come from the dummy tokenizer's mapping above.
+        self.assertEqual(processor.processor.image_ids, [1])
+        self.assertEqual(processor.processor.video_ids, [2])
+        self.assertEqual(processor.processor.audio_ids, [None])
+
+    def test_qwen3_vl_processor_initializes_modality_id_lists(self):
+        """_build_processor must populate the per-modality id lists that
+        ProcessorMixin.__init__ would have set. apply_chat_template ->
+        create_mm_token_type_ids iterates these on every render and raises
+        AttributeError when they are missing.
+        """
+        from mlx_embeddings.models import qwen3_vl
+
+        class DummyTokenizer:
+            chat_template = "dummy-template"
+            name_or_path = "dummy-model"
+
+            def convert_tokens_to_ids(self, token):
+                return {
+                    "<|image_pad|>": 11,
+                    "<|video_pad|>": 22,
+                    "<|vision_start|>": 33,
+                    "<|vision_end|>": 44,
+                }[token]
+
+        dummy_image_processor = MagicMock()
+        dummy_image_processor.merge_size = 2
+
+        inner = qwen3_vl.Processor._build_processor(
+            DummyTokenizer(), dummy_image_processor
+        )
+
+        self.assertEqual(inner.image_ids, [inner.image_token_id])
+        self.assertEqual(inner.video_ids, [inner.video_token_id])
+        # Qwen3-VL has no audio modality; mirror ProcessorMixin behaviour by
+        # exposing a placeholder list rather than leaving the attribute unset.
+        self.assertEqual(inner.audio_ids, [None])
+
+        # Exercise the actual consumer that crashed in production:
+        # ProcessorMixin.create_mm_token_type_ids is called by
+        # Qwen3VLProcessor.__call__ (return_mm_token_type_ids=True by default)
+        # on every apply_chat_template render. It iterates the *_ids lists via
+        # np.isin, so a missing list raises AttributeError and a None-only
+        # list must not produce false positives on text tokens. The helper
+        # only exists on newer transformers (the bug doesn't apply on
+        # versions without it), so guard the assertion with hasattr.
+        if not hasattr(inner, "create_mm_token_type_ids"):
+            return
+        type_ids = inner.create_mm_token_type_ids(
+            [[inner.image_token_id, inner.video_token_id, 999]]
+        )
+        # image -> 1, video -> 2, text -> 0; audio (placeholder [None]) must
+        # not match the arbitrary text token 999.
+        self.assertEqual(type_ids, [[1, 2, 0]])
 
     def test_qwen3_vl_model_process_uses_high_level_processor_paths(self):
         from mlx_embeddings.models import qwen3_vl

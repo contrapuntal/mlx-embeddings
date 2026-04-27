@@ -157,6 +157,16 @@ class Processor:
             else tokenizer.convert_tokens_to_ids(processor.vision_end_token)
         )
 
+        # Mirror the per-modality id lists that ProcessorMixin.__init__ would
+        # have populated. apply_chat_template -> create_mm_token_type_ids
+        # iterates these on every render; without them the call raises
+        # AttributeError because object.__new__ skipped __init__. Using the
+        # same getattr-with-None pattern keeps semantics identical to upstream
+        # (e.g. audio_ids = [None] for Qwen3-VL, which has no audio modality).
+        processor.image_ids = [getattr(processor, "image_token_id", None)]
+        processor.video_ids = [getattr(processor, "video_token_id", None)]
+        processor.audio_ids = [getattr(processor, "audio_token_id", None)]
+
         return processor
 
     @staticmethod
